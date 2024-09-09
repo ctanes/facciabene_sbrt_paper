@@ -1,0 +1,1226 @@
+---
+title: "Facciabene SBRT patients - metagnomic analysis"
+author: "Ceylan Tanes"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=5,
+  fig.height=3,
+  fig.align = "center"
+  )
+```
+
+```{r child = 'facciabene_sbrt_preamble.Rmd'}
+```
+
+
+```{r}
+### protein alignments 
+prot_align_dir <- file.path(data_dir, "sbx_gene_family")
+
+ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ec.list"
+ko_ec_fp <- "/Users/tanesc/Documents/DBs/kegg/ko_enzyme.list"
+butyrate_info_fp <- "/Users/tanesc/Documents/DBs/butyrate/butyrate_20180612_gene_info_full.tsv"
+```
+
+```{r}
+read_gene_aln_results <- function(base_dir, s, taxon_info=F) {
+  gene_results <- data_frame(FileName = list.files(
+    base_dir, pattern="*_1.txt")) %>%
+    group_by(FileName) %>%
+    mutate(fileSize = file.info(file.path(base_dir, FileName))$size) %>%
+    ungroup() %>%
+    filter(fileSize > 25) %>% # delete empty files
+    group_by(FileName) %>%
+    do(read.delim(file.path(base_dir, .$FileName), stringsAsFactors = F)) %>%
+    ungroup() %>%
+    mutate(SampleID = sub("_1.txt", "", FileName, perl=T)) %>%
+    select(-FileName) 
+  
+  if (taxon_info) {
+    gene_results %>%
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, nesting(geneID, taxon), fill = list(count=0)) %>%
+      filter(!is.na(geneID)) 
+  } else {
+    gene_results %>%
+      group_by(SampleID, geneID) %>%
+      summarize(count = sum(count)) %>%
+      ungroup() %>%
+      
+      right_join(select(s, SampleID), by="SampleID") %>%
+      complete(SampleID, geneID, fill = list(count=0)) %>%
+      filter(!is.na(geneID))
+  }
+  
+}
+```
+
+
+
+```{r}
+#read in the KEGG data
+kegg <- read_gene_aln_results(file.path(prot_align_dir, "20190228_kegg_species_prokaryotes"), s, taxon_info=F) %>%
+  group_by(SampleID) %>%
+  mutate(kegg_counts = sum(count)) %>%
+  ungroup() %>%
+  mutate(props = count/kegg_counts)
+```
+
+```{r kegg beta diversity}
+kegg_matrix <- pivot_to_matrix(kegg, SampleID, geneID, props)
+bc_kegg <- vegdist(kegg_matrix)
+```
+
+
+```{r}
+ec_names <- read_delim(ec_fp, delim='\t', col_names = F) %>%
+  setNames(c("EC_id", "EC_desc")) %>%
+  separate(EC_desc, into=c("EC_desc", "rest"), extra = "merge", sep = ';') %>%
+  select(-rest)
+
+kegg_info <- read.delim(ko_ec_fp, stringsAsFactors = F, sep='\t', header = F) %>%
+  setNames(c("geneID", "EC_id")) %>%
+  mutate(geneID = sub("ko:", "", geneID)) %>%
+  group_by(geneID) %>%
+  mutate(weight = 1/n()) %>%
+  ungroup()
+
+ko_names <- read_delim("/Users/tanesc/Documents/DBs/kegg/ko.list", delim = "\t", col_names = F) %>%
+  setNames(c("geneID", "gene_name")) %>%
+  mutate(geneID = sub("ko:", "", geneID))
+
+kegg_ec <- kegg %>%
+  left_join(kegg_info, by="geneID") %>%
+  mutate(count = count*weight, props = props*weight) %>%
+  group_by(SampleID, EC_id) %>%
+  summarize(count = sum(count), props = sum(props)) %>%
+  ungroup() %>%
+  filter(!is.na(EC_id))
+
+kegg_gh <- kegg_ec %>%
+  filter(grepl("ec:3\\.2\\.1\\.", EC_id)) %>%
+  droplevels()
+
+```
+
+
+```{r}
+ko2path <- read_delim("/Users/tanesc/Documents/DBs/kegg/pathway_ko.list", col_names = F, delim = "\t") %>%
+  setNames(c("path", "geneID")) %>%
+  filter(grepl("map", path)) %>%
+  mutate(geneID = sub("ko:", "", geneID)) %>%
+  mutate(path = sub("path:", "", path))
+
+path_list <- read_delim("/Users/tanesc/Documents/DBs/kegg/prokaryotic_pathway.list", col_names = F, delim = "\t") %>%
+  setNames(c("path", "path_name")) %>%
+  mutate(path = paste0("map", path))
+
+
+path_abundances <- kegg %>%
+  left_join(ko2path, by="geneID") %>%
+  group_by(SampleID, path) %>%
+  summarize(props = sum(props)) %>%
+  right_join(path_list, by="path") ## it's a right join because we only want to keep the prok pathways
+```
+
+
+
+```{r}
+butyrate_info <- read.delim("/Users/tanesc/Documents/DBs/butyrate/butyrate_20180612_gene_info_full.tsv", stringsAsFactors = F) %>%
+  select(geneID="gene_name", taxon=Genome.Name, pathway_name) %>%
+  group_by(geneID, taxon, pathway_name) %>%
+  slice(1) %>%
+  ungroup()
+
+but <- bind_rows(
+  read_gene_aln_results(file.path(prot_align_dir, "butyrate_20180612"), s, taxon_info=T) %>%
+    left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+    mutate(database = "Butyrate")
+) %>%
+  left_join(select(s,SampleID, nonhost), by="SampleID") %>%
+  mutate(props = count/nonhost) %>%
+  group_by(SampleID, geneID, database, pathway_name) %>%
+  summarize(count = sum(count), props = sum(props)) %>% # get rid of taxon information
+  ungroup()
+```
+
+
+
+# SBRT analysis
+
+```{r}
+## Subset the metadata file to only keep the samples you would like to test on
+s_toTest <- s %>%
+  filter(Keep) %>%
+  filter(!isControl) %>%
+  mutate(study_group_label = fct_relabel(study_group, function(x) sub(" ", "\n", x))) %>%
+  droplevels()
+
+## Set colors for each factor ahead of time so they are consistent through the report.
+ann_colors = list(
+  current_antibiotics = factor_palette(s_toTest$current_antibiotics, as.character(wes_palette("Cavalcanti1"))),
+  study_group = factor_palette(s_toTest$study_group, viridis(5, end=0.8)),
+  study_group_label = factor_palette(s_toTest$study_group_label, viridis(5, end=0.8))
+)
+
+addmargins(table(s_toTest$subject_id, s_toTest$study_group, useNA = "ifany")) %>%
+  pander(split.table=Inf)
+```
+
+## KEGG
+
+Reads were aligned to the Kyoto Encyclopedia of Genes and Genomes (downloaded on February 28, 2019) using diamond sequence aligner (PMID:33828273). The resulting protein hits were mapped to KEGG ortholog database. Below is a PCoA plot of Bray-Curtis distances using relative abundances of KEGG orthologs.
+
+```{r}
+s_toTest %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=study_group, shape=current_antibiotics) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    theme_clean_pcoa() + 
+    labs(color="")
+```
+
+```{r}
+s_toTest %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=study_group, shape=treatment) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~study_group, ncol=5) +
+    theme_clean_pcoa() +
+    guides(color="none") +
+    theme(
+      legend.position = "bottom"
+    ) +
+    labs(shape="")
+ggsave("facciabene_SBRT_paper_Fig_PCoA_BC_kegg.pdf", height=3, width=6, useDingbats=F)
+```
+
+For each study day: distmat ~ treatment
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(study_group) %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ treatment,
+    sample_id_var = SampleID, permutations=999)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-sumsq) %>%
+  
+  mutate(fdr = p.adjust(p.value, method="BH"))
+
+summaries_df %>%
+  kable_style()
+```
+
+For each treatment: distmat ~ study_day
+
+```{r eval=T}
+summaries_df <- s_toTest %>%
+  group_by(treatment) %>%
+  do(adonispost(
+    ., distmat = bc_kegg, formula = distmat ~ study_group,
+    sample_id_var = SampleID, permutations=999, which = study_group, alpha = 1)) %>%
+  ungroup() %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-sumsq) %>%
+  
+  group_by(treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style()
+```
+
+
+
+## KEGG: Glycoside hydrolases
+
+
+```{r}
+genes_toTest <- kegg_gh %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(EC_id) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  left_join(ec_names, by="EC_id")
+```
+
+The glycoside hydrolases break down complex carbohydrates into simpler sugars. They are annotated with the enzyme commission (EC) number of EC:3.2.1. The orthologs that map to these EC numbers were pulled from KEGG alignments. The enzymes that were present in more than half of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+summaries_df <- genes_toTest %>%
+  group_by(EC_id, EC_desc, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em")
+```
+
+
+```{r fig.width=9, fig.height=3}
+summaries_df %>%
+  group_by(EC_id) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  mutate(EC_id = paste(EC_id, EC_desc, sep=' ')) %>%
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=EC_id, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_paper_Fig_kegg_GH.pdf", height=2.5, width=9, useDingbats=F)
+```
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+summaries_df <- genes_toTest %>%
+  group_by(EC_id, EC_desc, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Baseline - ", term)) %>% 
+  group_by(term, treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  select(-effect) %>%
+  select(-df) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em") ## if the table is running off the page, you can manually specify the width of the columns
+```
+
+
+```{r fig.width=10, fig.height=8}
+summaries_df %>%
+  group_by(EC_id) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  mutate(EC_id = paste(EC_id, EC_desc, sep=' ')) %>%
+  mutate(EC_id = reorder(EC_id, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=EC_id, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between time points",
+      y="", color="", shape=""
+    )
+```
+
+
+## KEGG: Pathway abundances
+
+```{r}
+path_toTest <- path_abundances %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(path) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+summaries_df <- path_toTest %>%
+  group_by(path, path_name, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em")
+```
+
+
+```{r fig.width=10, fig.height=5}
+summaries_df %>%
+  
+  mutate(path = paste(path, path_name, sep=' ')) %>%
+  mutate(path = reorder(path, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  group_by(path) %>%
+  mutate(num_sig = sum(fdr<0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  ggplot(aes(x=estimate, y=path, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    theme(
+      aspect.ratio=1
+    ) +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+summaries_df <- path_toTest %>%
+  group_by(path, path_name, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Baseline - ", term)) %>% 
+  
+  group_by(term, treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  select(-effect) %>%
+  select(-df) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em")
+```
+
+
+```{r fig.width=10, fig.height=10}
+summaries_df %>%
+  
+  mutate(path = paste(path, path_name, sep=' ')) %>%
+  mutate(path = reorder(path, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  group_by(path) %>%
+  mutate(num_sig = sum(fdr<0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  ggplot(aes(x=estimate, y=path, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+### Pathways of interest
+
+Pathways related to arginine, glutamate, tryptopha, methionine, hypoxanthine and histidine are selected from KEGG
+
+```{r}
+paths_of_interest <- c("map00220", "map00330", "map00472", 
+                       "map00250", "map00471",
+                       "map00380", "map00400",
+                       "map00270", "map00230", "map00340")
+
+path_toTest <- path_abundances %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  filter(path %in% paths_of_interest) %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+summaries_df <- path_toTest %>%
+  group_by(path, path_name, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em")
+```
+
+
+```{r fig.width=10, fig.height=5}
+summaries_df %>%
+  
+  mutate(path = paste(path, path_name, sep=' ')) %>%
+  mutate(path = reorder(path, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  group_by(path) %>%
+  mutate(num_sig = sum(fdr<0.05)) %>%
+  ungroup() %>%
+  #filter(num_sig > 0) %>%
+  
+  ggplot(aes(x=estimate, y=path, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    theme(
+      aspect.ratio=1
+    ) +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_pathway1.pdf", height=3, width=9, useDingbats=F)
+```
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+summaries_df <- path_toTest %>%
+  group_by(path, path_name, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Baseline - ", term)) %>% 
+  
+  group_by(term, treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  select(-effect) %>%
+  select(-df) %>%
+  kable_style(fdr, 0.05) %>%
+  column_spec(c(2), width = "15em")
+```
+
+
+```{r fig.width=10, fig.height=3}
+summaries_df %>%
+  
+  mutate(path = paste(path, path_name, sep=' ')) %>%
+  mutate(path = reorder(path, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  group_by(path) %>%
+  mutate(num_sig = sum(fdr<0.05)) %>%
+  ungroup() %>%
+  #filter(num_sig > 0) %>%
+  
+  ggplot(aes(x=estimate, y=path, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_pathway2.pdf", height=3, width=9, useDingbats=F)
+```
+
+
+```{r}
+summaries_df %>%
+  filter(path %in% c("map00220", "map00330")) %>%
+  group_by(term, treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(path_name, treatment, term, estimate, p.value,fdr) %>%
+  pander(split.table=Inf, digits=2)
+```
+
+
+```{r fig.height=8}
+path_toTest %>%
+  filter(path %in% c("map00220", "map00330")) %>%
+  mutate(path_name = sub("proline metabolism", "proline\nmetabolism", path_name)) %>%
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, shape=treatment)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    facet_wrap(~path_name, ncol = 1) +
+    scale_color_manual(values=ann_colors$study_group_label) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    theme(
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="",
+      y="Relative abundance"
+    )
+ggsave("facciabene_SBRT_paper_Fig_arginine_pathways.pdf", height=5.5, width=5.5, useDingbats=F)
+```
+
+
+## KEGG: Genes in select pathways
+
+```{r}
+genes_of_interest <- ko2path %>%
+  filter(path %in% paths_of_interest) %>%
+  left_join(path_list, by="path") %>%
+  group_by(geneID) %>%
+  summarize(pathways = paste(path_name, collapse=", "))
+
+genes_toTest <- kegg %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  
+  inner_join(genes_of_interest, by="geneID") %>%
+  filter(perc_present > 0.5) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props)) %>%
+  
+  left_join(ko_names, by="geneID")
+```
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+summaries_df <- genes_toTest %>%
+  group_by(geneID, gene_name, pathways, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value<0.05) %>%
+#  kable_style(fdr, 0.05) %>%
+#  column_spec(c(2:3), width = "15em")
+```
+
+
+```{r fig.width=12, fig.height=3}
+summaries_df %>%
+  group_by(geneID) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  mutate(geneID = paste(geneID, gene_name, pathways, sep=' ')) %>%
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=geneID, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_genes1.pdf", height=3, width=12, useDingbats=F)
+```
+
+For each treatment: props_log ~ study_group
+
+```{r}
+summaries_df <- genes_toTest %>%
+  group_by(geneID, gene_name, pathways, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "Baseline - ", term)) %>% 
+  
+  group_by(term, treatment) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+#summaries_df %>%
+#  filter(p.value < 0.05) %>%
+#  select(-effect) %>%
+#  select(-df) %>%
+#  kable_style(fdr, 0.05) %>%
+#  column_spec(c(2:3), width = "15em")
+```
+
+
+```{r fig.width=25, fig.height=15}
+summaries_df %>%
+  group_by(geneID) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  
+  mutate(geneID = paste(geneID, gene_name, pathways, sep=' ')) %>%
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=geneID, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$term) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between time points",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_genes2.pdf", height=15, width=25, useDingbats=F)
+```
+
+
+```{r fig.width=15, fig.height=6}
+summaries_df %>%
+  group_by(geneID) %>%
+  mutate(num_sig = sum(fdr < 0.05)) %>%
+  ungroup() %>%
+  filter(num_sig > 0) %>%
+  filter(pathways %in% c("Arginine biosynthesis", "Arginine and proline metabolism")) %>%
+  droplevels() %>%
+  
+  mutate(pathways = gsub(" ", "\n", pathways)) %>%
+  separate(gene_name, into=c("gene_name", "gene_name_rest"), extra="merge", sep = ";") %>%
+  
+  mutate(term = sub("Baseline - ", "", term)) %>%
+  mutate(term = factor(term, levels=levels(s_toTest$study_group))) %>%
+  mutate(treatment = stringr::str_to_title(treatment)) %>%
+  
+  #mutate(geneID = paste(geneID, gene_name, pathways, sep=' ')) %>%
+  mutate(gene_name = reorder(gene_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=gene_name, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_grid(pathways~treatment, scales="free", space="free") +
+    theme_clean() +
+    theme(
+      strip.text.y = element_text(angle = 0)
+    ) +
+    labs(
+      x="Estimated log difference between\nbaseline and other time points",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_paper_Fig_arginine_genes.pdf", height=4.5, width=7, useDingbats=F)
+```
+
+
+
+## Butyrate genes
+
+
+```{r}
+genes_toTest <- but %>%
+  right_join(s_toTest, by="SampleID") %>%
+  
+  group_by(geneID) %>%
+  mutate(perc_present = mean(props > 0)) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(perc_present > 0.25) %>%
+  droplevels() %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+Proteins are aligned to butyrate producing genes (PMID:24757212), IPA producing genes (PMID:29168502), as well as bacterial enzymes responsible for bile acid modification bai and BSH (PMID:18757757). The enzymes that were present in more than a quarter of the samples were tested for further testing. Linear models were used to estimate the change in relative abundance of the selected genes between study groups. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.05 are shown in the table below.
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, database, pathway_name, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  mutate(term = sub("current_antibioticsVancomycin", "Vanco effect", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  arrange(database, geneID) %>%
+  kable_style(fdr, 0.05)
+
+```
+
+```{r}
+summaries_df %>%
+  filter(geneID %in% c("Bcd", "Buk", "But")) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, study_group, term, estimate, p.value, fdr) %>%
+  kable_style(fdr, 0.05)
+```
+
+
+```{r fig.width=10, fig.height=10}
+summaries_df %>%
+  
+  mutate(geneID = paste(geneID, pathway_name, sep=' ')) %>%
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=estimate, y=geneID, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+
+summaries_df <- genes_toTest %>%
+  
+  group_by(geneID, database, pathway_name, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>%
+  mutate(term = sub("study_group", "Baseline - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  select(-effect) %>%
+  select(-df) %>%
+  arrange(database, geneID) %>%
+  kable_style(fdr, 0.05)
+
+```
+
+
+```{r}
+summaries_df %>%
+  filter(geneID %in% c("Bcd", "Buk", "But")) %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, treatment, term, estimate, p.value, fdr) %>%
+  kable_style(fdr, 0.05)
+```
+
+
+```{r fig.width=10, fig.height=10}
+summaries_df %>%
+  
+  mutate(geneID = paste(geneID, pathway_name, sep=' ')) %>%
+  mutate(geneID = reorder(geneID, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.1, "q<0.1", "q>0.1")) %>%
+  
+  ggplot(aes(x=estimate, y=geneID, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    #scale_color_manual(values=ann_colors$term) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+
+```{r fig.height=3, fig.width=6}
+genes_toTest %>%
+  filter(geneID %in% c("Bcd", "Buk", "But")) %>%
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, shape=treatment)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    facet_wrap(~geneID, ncol = 3) +
+    scale_color_manual(values=ann_colors$study_group_label) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_y_continuous(labels=scales:::percent, limits=c(0,0.0003)) +
+    theme_clean() +
+    theme(
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="",
+      y="Relative abundance"
+    )
+ggsave("facciabene_SBRT_paper_Fig_butyrate_genes.pdf", height=4, width=6, useDingbats=F)
+```
+
+
+### Butyrate pathways
+
+```{r}
+genes_toTest <- but %>%
+  group_by(SampleID, pathway_name) %>%
+  summarize(props = sum(props)) %>%
+  ungroup() %>%
+  
+  right_join(s_toTest, by="SampleID") %>%
+  mutate(props_log = log10(props))
+```
+
+
+For each study day: props_log ~ treatment
+
+```{r}
+
+summaries_df <- genes_toTest %>%
+  
+  group_by(pathway_name, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>%
+  mutate(term = sub("current_antibioticsVancomycin", "Vanco effect", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.05)
+
+```
+
+
+```{r fig.width=10, fig.height=4}
+summaries_df %>%
+  
+  mutate(pathway_name = reorder(pathway_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=pathway_name, color=study_group, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    #facet_wrap(~sample_type) +
+    theme_clean() +
+    labs(
+      x="Estimated log difference between groups",
+      y="", color="", shape=""
+    )
+```
+
+
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+
+summaries_df <- genes_toTest %>%
+  
+  group_by(pathway_name, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% ### You only need this when you are not using the tidy_lm_posthoc function
+  mutate(term = sub("study_group", "Baseline - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  kable_style(fdr, 0.05)
+
+```
+
+
+```{r fig.width=10, fig.height=4}
+summaries_df %>%
+  mutate(term = sub("Baseline - ", "", term)) %>%
+  mutate(term = factor(term, levels=levels(s_toTest$study_group))) %>%
+  mutate(treatment = stringr::str_to_title(treatment)) %>%
+  
+  mutate(pathway_name = sub("4amino", "4-amino", pathway_name)) %>%
+  mutate(pathway_name = reorder(pathway_name, estimate)) %>%
+  mutate(isSig = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  
+  ggplot(aes(x=estimate, y=pathway_name, color=term, shape=isSig)) +
+    geom_vline(xintercept=0, linetype=2) +
+    geom_pointrange(aes(xmin=estimate-std.error, xmax=estimate+std.error), position = position_dodge(width = 0.5)) +
+    scale_color_manual(values=ann_colors$study_group) +
+    scale_shape_manual(values=c(16,1)) +
+    facet_wrap(~treatment) +
+    theme_clean() +
+    theme(
+      aspect.ratio=1
+    ) +
+    labs(
+      x="Estimated log difference between\nbaseline and other time points",
+      y="", color="", shape=""
+    )
+ggsave("facciabene_SBRT_paper_Fig_butyrate_pathways.pdf", height=4, width=6, useDingbats=F)
+```
+
+
+
+## KEGG: bai and BSH genes
+
+```{r}
+genes_toTest <- kegg %>%
+  filter(geneID %in% c("K15869", "K22605", "K15868", "K15870", "K15872", "K15871", "K15873", "K15874", "K01442")) %>%
+  left_join(ko_names, by="geneID") %>%
+  separate(gene_name, into=c("gene_name", "gene_name_rest"), extra="merge", sep = ";") %>%
+  mutate(gene_name = sub("cbh", "BSH", gene_name)) %>%
+  
+  right_join(s_toTest, by="SampleID") %>%
+  
+  mutate(props_original = props) %>%
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+```
+
+
+```{r fig.height=10, fig.width=6}
+genes_toTest %>%
+  mutate(geneID = paste(geneID, gene_name, sep='\n')) %>%
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, shape=treatment)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    facet_wrap(~geneID, ncol = 3, scales="free") +
+    scale_color_manual(values=ann_colors$study_group_label) +
+    scale_shape_manual(values=c(16,1)) +
+    #scale_y_continuous(labels=scales:::percent, limits=c(0,0.0002)) +
+    scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    theme(
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="",
+      y="Relative abundance"
+    )
+```
+
+
+
+```{r fig.height=4, fig.width=6}
+genes_toTest_grouped <- genes_toTest %>%
+  mutate(gene_name_grouped = ifelse(gene_name == "BSH", "BSH", "bai")) %>%
+  group_by(SampleID, gene_name_grouped, study_group, study_group_label, treatment, subject_id) %>%
+  summarize(props = sum(props_original)) %>%
+  ungroup() %>%
+  
+  mutate(props = props + min(filter(., props>0)$props) / 10) %>%
+  mutate(props_log = log10(props))
+
+
+genes_toTest_grouped %>%
+  
+  ggplot(aes(x=study_group_label, y=props, color=study_group_label, shape=treatment)) +
+    geom_boxplot(outlier.alpha=0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    facet_wrap(~gene_name_grouped, ncol = 3, scales="free") +
+    scale_color_manual(values=ann_colors$study_group_label) +
+    scale_shape_manual(values=c(16,1)) +
+    scale_y_continuous(labels=scales:::percent) +
+    #scale_y_continuous(labels=scales:::percent) +
+    theme_clean() +
+    theme(
+      axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+      legend.position = "bottom",
+      aspect.ratio=1
+    ) +
+    guides(color="none") +
+    labs(
+      x="", shape="",
+      y="Relative abundance"
+    )
+ggsave("facciabene_SBRT_paper_Fig_bile_acid_genes.pdf", height=4, width=5, useDingbats=F)
+```
+
+
+For each study group: props_log ~ treatment
+
+```{r}
+
+summaries_df <- genes_toTest_grouped %>%
+  
+  group_by(gene_name_grouped, study_group) %>%
+  do(tidy(lm(props_log ~ treatment, data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  mutate(term = sub("current_antibioticsVancomycin", "Vanco effect", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.05)
+
+```
+
+
+
+For each treatment: props_log ~ study_group
+
+```{r}
+
+summaries_df <- genes_toTest_grouped %>%
+  
+  group_by(gene_name_grouped, treatment) %>%
+  do(tidy(nlme::lme(props_log ~ study_group, random=~1|subject_id, data=., na.action=na.omit), effect="fixed")) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("treatment", "Control - ", term)) %>% 
+  mutate(term = sub("study_group", "Baseline - ", term)) %>%
+  
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+summaries_df %>%
+  kable_style(fdr, 0.05)
+
+```
+

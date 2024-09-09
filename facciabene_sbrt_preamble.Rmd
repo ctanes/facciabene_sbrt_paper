@@ -1,0 +1,235 @@
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(wesanderson)
+library(RColorBrewer)
+
+# stats packages
+library(adonisplus)
+library(nlme)
+library(emmeans) # for lmer post-hoc tests
+library(broom.mixed)
+```
+
+```{r}
+p_stars <- function (pvals) {
+  cut(pvals, breaks = c(-Inf, 0.001, 0.01, 0.05, Inf), labels = c("***", "**", "*", ""))
+}
+
+tidy_lm_posthoc <- function(lmer_test, term_string) {
+  form1 <- as.formula(paste("pairwise ~", term_string))
+  mod <- anova(lmer_test)
+  
+  if(class(lmer_test) == "lm") {
+    main_tidy <- tidy(mod)
+  } else {
+    main_tidy <- data.frame(term = rownames(mod), mod, row.names=NULL) %>% 
+      rename(df=numDF)
+  }
+  
+  bind_rows(main_tidy,
+            data.frame(emmeans(lmer_test, form1, adjust="tukey")$contrasts) %>% rename(term = contrast, std.error=SE)
+            ) %>%
+    mutate(estimate = estimate * -1) %>%
+    select(term, df, estimate, std.error,  p.value) ## can also add statistic and t.ratio columns if needed
+}
+
+
+theme_clean <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      panel.grid = element_blank(), 
+      strip.background = element_blank()
+    )
+}
+
+theme_clean_pcoa <- function(){ 
+    theme_bw() %+replace%    #replace elements we want to change
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    )
+}
+
+kable_style <- function(data, col_name=p.value, threshold=0.05) {
+  
+  row_num <- nrow(data)
+  
+  ##substitute underscore with escaped underscores and remove na in p.value columns
+  data_return <- data %>%
+    select_all(~gsub("_", "\\\\_", .)) %>% ##need to escape the escape
+    select_all(~gsub("#", "\\\\#", .)) %>% ##need to escape the escape
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("_", " ", .)) %>%
+    mutate_if(function(x) is.character(x) | is.factor(x), ~gsub("%", "\\\\%", .))
+  
+  ## highlight significant values
+  col_name <- enquo(col_name)
+  data_return <- data_return %>%
+    mutate(!!col_name := cell_spec(signif(!!col_name, 2), "latex", bold = !!col_name<threshold))
+  
+  ##if Taxa is a column in the dataframe
+  if(sum(grepl("Taxa", colnames(data_return))) > 0)  {
+    data_return <- data_return %>%
+      mutate(Taxa = gsub("[pcofgs]__", "", Taxa))
+  }
+  
+  # ... should be column number
+  if (row_num > 15) {
+    data_return <- data_return %>%
+      kable("latex", longtable = T, digits=2, booktabs=T, escape=F) %>%
+      kable_styling(latex_options = c("repeat_header", "HOLD_position"), font_size = 7) %>%
+      row_spec(0, bold = T, color="#7C0A02") #%>%
+      #collapse_rows(columns = 1, valign = "top") 
+    
+  }
+  else {
+    data_return <- data_return %>%
+      kable("latex", longtable = F, digits=2, booktabs=T, escape=F) %>%
+      kable_styling(latex_options = c("scale_down", "repeat_header", "HOLD_position")) %>%
+      row_spec(0, bold = T, color="#7C0A02")
+    
+    if(row_num > 1) { ##always collapse row unless there is only 1 row
+      data_return <- data_return %>%
+        collapse_rows(columns = 1, valign = "top")
+    }
+  }
+  
+  return(data_return)
+  
+}
+
+
+```
+
+```{r}
+data_dir <- "Data"
+
+### minimum QC read count threshold
+min_reads <- 1000000
+
+### number of permutations for the PERMANOVA test
+perm <- 99 ## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
+
+### rarefying subsample size 
+richness_subsample_size <- 1000
+
+### mapping file path
+mapping_file_fp <- file.path(data_dir, "20231109_facciabene_SBRT_run4_chopmc235_merged_metadata.txt")
+
+### taxonomic assignment 
+feature_table_fp <- file.path(data_dir, "20231109_facciabene_SBRT_run4_chopmc235_kraken_merged.tsv")
+```
+
+
+```{r sample_sheet_import, echo=FALSE}
+s <- read.delim(mapping_file_fp) %>%
+  mutate(SampleID = as.character(SampleID), subject_id = as.character(subject_id)) %>%
+  mutate(isControl = grepl("extractempty|extractblank|EBneg|vibriolamda|mockdna", SampleID, ignore.case = T)) %>%
+  mutate(Keep = input > min_reads) %>%
+  
+  mutate(study_group = factor(study_group, levels=c("Baseline", "Start SBRT", "End SBRT", "Inspection", "Three months"))) %>%
+  mutate(treatment = factor(treatment)) %>%
+  mutate(current_antibiotics = factor(current_antibiotics)) %>%
+  
+  mutate(study_group_consec = study_group)
+
+contrasts(s$study_group_consec) <- matrix(c(-4/5, 1/5, 1/5, 1/5, 1/5,
+                                            -3/5, -3/5, 2/5, 2/5, 2/5,
+                                            -2/5, -2/5, -2/5, 3/5, 3/5,
+                                            -1/5, -1/5, -1/5, -1/5, 4/5), ncol = 4)
+```
+
+
+```{r}
+## Check if there are any samples with no reads and remove them from the 
+## sample sheet so it doesn't mess with the rest of the code.
+noRead_samples <- s %>%
+  filter(both_kept < 5) %>%
+  select(SampleID, sample_type) %>%
+  arrange(sample_type)
+
+if (nrow(noRead_samples) > 0) {
+  pander(noRead_samples, caption = "The samples that yielded less than 5 reads after quality control steps were removed from the reports.")
+}
+
+s <- s %>%
+  filter(both_kept >= 5)
+```
+
+
+
+```{r}
+o <- read_qiime_otu_table(feature_table_fp)
+
+counts <- o$counts
+colnames(counts) <- sub("\\.taxa$", "", colnames(counts))
+counts <- counts[,s$SampleID]
+
+ta <- o$metadata %>%
+  enframe("Taxid", "Taxon") %>%
+  mutate(Taxon = str_remove(Taxon, "(; [kpcofgs]__)+$")) %>%
+  mutate(Taxon = gsub("[kpcofgs]__", "", Taxon)) 
+
+adf <- split_assignments(ta$Taxon) %>%
+  mutate(Species = ifelse(!is.na(Genus) & !is.na(Species), paste(Genus, Species), NA))
+rownames(adf) <- ta$Taxid
+
+# Delete human contamination and emp
+is_human <- grepl("Chordata", adf$Phylum)
+is_empty <- rowSums(counts) == 0
+taxa_to_delete = is_human | is_empty
+adf <- adf[!taxa_to_delete,]
+counts <- counts[!taxa_to_delete,]
+rm(is_human, is_empty, taxa_to_delete)
+
+a <- simplify_assignments(adf, rank1 = "Phylum", rank2="Species")
+
+summed_cts <- rowsum(counts, a) 
+summed_props <- sweep(summed_cts, 2, colSums(summed_cts), "/")
+
+a_g <- simplify_assignments(adf, rank1="Phylum", rank2="Genus")
+summed_cts_g <- rowsum(counts, a_g) 
+summed_props_g <- sweep(summed_cts_g, 2, colSums(summed_cts_g), "/")
+
+a_p <- simplify_assignments(adf, rank1="Kingdom", rank2="Phylum")
+summed_cts_p <- rowsum(counts, a_p) 
+summed_props_p <- sweep(summed_cts_p, 2, colSums(summed_cts_p), "/")
+
+s <- merge(s, data.frame(kraken_counts= colSums(summed_cts)), by.x="SampleID", by.y="row.names", all.x=T)
+```
+
+```{r alpha}
+richness <- rarefy(t(counts), richness_subsample_size) %>%
+  enframe("SampleID", "Richness")
+  
+shannon <- diversity(t(counts)) %>%
+  enframe("SampleID", "Shannon")
+
+s <- s %>%
+  left_join(richness, by="SampleID") %>%
+  left_join(shannon, by="SampleID")
+
+rm(richness, shannon)
+```
+
+```{r beta}
+bc <- vegdist(t(summed_props))
+jd <- vegdist(t(summed_props), binary = T, method = "jaccard")
+```
+
