@@ -195,6 +195,8 @@ s_toTest %>%
     labs(color="")
 ```
 
+#### Fig 3A
+
 ```{r}
 s_toTest %>%
   pcoaplus(bc_kegg) %>%
@@ -208,7 +210,32 @@ s_toTest %>%
       legend.position = "bottom"
     ) +
     labs(shape="")
-ggsave("facciabene_SBRT_paper_Fig_PCoA_BC_kegg.pdf", height=3, width=6, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_PCoA_BC_kegg.pdf", height=4, width=7.8, useDingbats=F)
+```
+
+```{r}
+s_toTest %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ current_antibiotics,
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-sumsq) %>%
+  
+  mutate(fdr = p.adjust(p.value, method="BH"))
+```
+
+
+```{r}
+s_toTest %>%
+  filter(study_group %in% c("Start SBRT", "End SBRT")) %>%
+  do(adonisplus(
+    ., distmat = bc_kegg, formula = distmat ~ current_antibiotics + study_group, 
+    rep_meas_var=subject_id, shuffle=c(current_antibiotics = "between", study_group = "within"),
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-sumsq) %>%
+  
+  mutate(fdr = p.adjust(p.value, method="BH"))
 ```
 
 For each study day: distmat ~ treatment
@@ -297,6 +324,8 @@ summaries_df %>%
 ```
 
 
+#### Fig3B
+
 ```{r fig.width=9, fig.height=3}
 summaries_df %>%
   group_by(EC_id) %>%
@@ -319,7 +348,7 @@ summaries_df %>%
       x="Estimated log difference between groups",
       y="", color="", shape=""
     )
-ggsave("facciabene_SBRT_paper_Fig_kegg_GH.pdf", height=2.5, width=9, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_kegg_GH.pdf", height=2.5, width=7, useDingbats=F)
 ```
 
 
@@ -624,19 +653,20 @@ summaries_df %>%
   select(path_name, treatment, term, estimate, p.value,fdr) %>%
   pander(split.table=Inf, digits=2)
 ```
-
+#### Fig3G
 
 ```{r fig.height=8}
 path_toTest %>%
   filter(path %in% c("map00220", "map00330")) %>%
-  mutate(path_name = sub("proline metabolism", "proline\nmetabolism", path_name)) %>%
+  #mutate(path_name = sub("proline metabolism", "proline\nmetabolism", path_name)) %>%
+  #mutate(path_name = sub("biosynthesis", "\nbiosynthesis", path_name)) %>%
   ggplot(aes(x=study_group_label, y=props, color=study_group_label, shape=treatment)) +
     geom_boxplot(outlier.alpha=0) +
     geom_quasirandom(dodge.width = 0.75) +
-    facet_wrap(~path_name, ncol = 1) +
+    facet_wrap(~path_name, ncol = 2) +
     scale_color_manual(values=ann_colors$study_group_label) +
     scale_shape_manual(values=c(16,1)) +
-    scale_y_continuous(labels=scales:::percent) +
+    scale_y_continuous(labels=scales:::percent, limits=c(0.005, 0.017)) +
     theme_clean() +
     theme(
       axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
@@ -648,7 +678,7 @@ path_toTest %>%
       x="", shape="",
       y="Relative abundance"
     )
-ggsave("facciabene_SBRT_paper_Fig_arginine_pathways.pdf", height=5.5, width=5.5, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_arginine_pathways.pdf", height=3.1, width=6, useDingbats=F)
 ```
 
 
@@ -957,7 +987,7 @@ summaries_df %>%
 ```
 
 
-
+#### Fig3D
 ```{r fig.height=3, fig.width=6}
 genes_toTest %>%
   filter(geneID %in% c("Bcd", "Buk", "But")) %>%
@@ -979,7 +1009,7 @@ genes_toTest %>%
       x="", shape="",
       y="Relative abundance"
     )
-ggsave("facciabene_SBRT_paper_Fig_butyrate_genes.pdf", height=4, width=6, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_butyrate_genes.pdf", height=3.1, width=6, useDingbats=F)
 ```
 
 
@@ -1068,6 +1098,8 @@ summaries_df %>%
 ```
 
 
+#### Fig3C
+
 ```{r fig.width=10, fig.height=4}
 summaries_df %>%
   mutate(term = sub("Baseline - ", "", term)) %>%
@@ -1086,13 +1118,14 @@ summaries_df %>%
     facet_wrap(~treatment) +
     theme_clean() +
     theme(
-      aspect.ratio=1
+      aspect.ratio=1,
+      legend.position="bottom"
     ) +
     labs(
       x="Estimated log difference between\nbaseline and other time points",
       y="", color="", shape=""
     )
-ggsave("facciabene_SBRT_paper_Fig_butyrate_pathways.pdf", height=4, width=6, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_butyrate_pathways.pdf", height=2.8, width=7, useDingbats=F)
 ```
 
 
@@ -1138,6 +1171,7 @@ genes_toTest %>%
     )
 ```
 
+#### Fig 3E
 
 
 ```{r fig.height=4, fig.width=6}
@@ -1172,7 +1206,7 @@ genes_toTest_grouped %>%
       x="", shape="",
       y="Relative abundance"
     )
-ggsave("facciabene_SBRT_paper_Fig_bile_acid_genes.pdf", height=4, width=5, useDingbats=F)
+ggsave("facciabene_SBRT_paper_Fig_bile_acid_genes.pdf", height=3.1, width=5, useDingbats=F)
 ```
 
 

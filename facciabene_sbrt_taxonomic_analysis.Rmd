@@ -558,6 +558,19 @@ ggsave("facciabene_SBRT_paper_Fig_PCoA_BC.pdf", height=3, width=6, useDingbats=F
 ```
 
 
+```{r}
+s_toTest %>%
+  filter(study_group %in% c("Start SBRT", "End SBRT")) %>%
+  do(adonisplus(
+    ., distmat = bc, formula = distmat ~ current_antibiotics + study_group, 
+    rep_meas_var=subject_id, shuffle=c(current_antibiotics = "between", study_group = "within"),
+    sample_id_var = SampleID, permutations=999)) %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(-sumsq) %>%
+  
+  mutate(fdr = p.adjust(p.value, method="BH"))
+```
+
 PERMANOVA test on Bray-Curtis and Jaccard distances to test if the centroids of the study groups can be distinguished from each other.
 
 For each study day: distmat ~ treatment
